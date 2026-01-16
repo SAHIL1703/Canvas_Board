@@ -1,6 +1,5 @@
 import { getStroke } from "perfect-freehand";
 
-// Generate a smooth SVG path from points (for perfect-freehand)
 export const getSvgPathFromStroke = (stroke) => {
   if (!stroke.length) return "";
   const d = stroke.reduce(
@@ -15,36 +14,42 @@ export const getSvgPathFromStroke = (stroke) => {
   return d.join(" ");
 };
 
-// Create a new element object
 export const createElement = (id, x1, y1, x2, y2, type, options) => {
-  const { strokeColor, strokeWidth, userId } = options;
+  const { strokeColor, strokeWidth, userId, fillStyle } = options;
+
+  const base = {
+    id,
+    type,
+    strokeColor,
+    strokeWidth,
+    userId,
+    fillStyle: fillStyle || "transparent", // New fill property
+    isDeleted: false,
+    deletedAt: null,
+  };
 
   switch (type) {
     case "pencil":
       return {
-        id,
-        type,
+        ...base,
         points: [{ x: x1, y: y1 }],
-        strokeColor,
-        strokeWidth,
-        userId,
-        isDeleted: false,
       };
-      
-    case "rect":
+    case "line":
+    case "arrow":
       return {
-        id,
-        type,
+        ...base,
+        x1, y1, x2, y2, // Store exact start/end points
+      };
+    case "rect":
+    case "ellipse":
+    case "star":
+      return {
+        ...base,
         x: Math.min(x1, x2),
         y: Math.min(y1, y2),
         width: Math.abs(x2 - x1),
         height: Math.abs(y2 - y1),
-        strokeColor,
-        strokeWidth,
-        userId,
-        isDeleted: false,
       };
-
     default:
       return null;
   }

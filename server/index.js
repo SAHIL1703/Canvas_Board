@@ -2,151 +2,148 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const mongoose = require("mongoose");
 const dotenv = require("dotenv");
-const connectDB = require("./config/db");
 const Room = require("./models/Room");
 
 dotenv.config();
-connectDB();
-
 const app = express();
 app.use(cors());
 
-const server = http.createServer(app);
+// --- MONGODB SETUP ---
+mongoose
+  .connect(process.env.MONGO_URI || "mongodb://localhost:27017/whiteboard")
+  .then(() => console.log("MongoDB Connected"))
+  .catch((err) => console.log(err));
 
-// Initialize Socket.io with CORS allowed
+const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: "*", // Allow connections from React frontend
-    methods: ["GET", "POST"],
-  },
+  cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
 io.on("connection", (socket) => {
-  console.log(`User Connected: ${socket.id}`);
+  console.log("User Connected:", socket.id);
 
-  // 1. JOIN ROOM
+  // 1. Join Room
   socket.on("join-room", async (roomId) => {
     socket.join(roomId);
-    console.log(`User ${socket.id} joined room: ${roomId}`);
-
     try {
-      // Find room or create if it doesn't exist
       let room = await Room.findOne({ roomId });
-      
       if (!room) {
         room = await Room.create({ roomId, elements: [] });
       }
-
-      // Send the entire drawing history to the new user
-      // We send EVERYTHING (even deleted ones) so client can manage its own redo stack if needed
       socket.emit("load-canvas", room.elements);
     } catch (error) {
-      console.error("Error loading room:", error);
+      console.error(error);
     }
   });
 
-  // 2. REALTIME DRAWING (Performance Optimized)
+  // 2. Draw / Update Element
   socket.on("draw-element", async ({ roomId, element }) => {
-    // 1. Broadcast immediately to others (Optimistic UI)
-    socket.to(roomId).emit("element-update", element);
+    socket.to(roomId).emit("element-update", element); // Optimistic UI update for others
 
-    // 2. Save to Database
     try {
       const room = await Room.findOne({ roomId });
-      if (room) {
-        // Check if this element ID already exists (editing/moving)
-        const existingIndex = room.elements.findIndex((el) => el.id === element.id);
-        
-        if (existingIndex !== -1) {
-          // Update existing
-          room.elements[existingIndex] = element;
-        } else {
-          // Add new
-          room.elements.push(element);
-        }
-        await room.save();
+      if (!room) return;
+
+      const index = room.elements.findIndex((el) => el.id === element.id);
+
+      if (index !== -1) {
+        await Room.updateOne(
+          { roomId },
+          { $set: { [`elements.${index}`]: element } }
+        );
+      } else {
+        await Room.updateOne({ roomId }, { $push: { elements: element } });
       }
     } catch (error) {
-      console.error("Error saving element:", error);
+      console.error("Error saving draw:", error);
     }
   });
 
-  // 3. CURSOR TRACKING (Bonus Feature)
+  // 3. Cursor Movement
   socket.on("cursor-move", ({ roomId, userId, userName, x, y }) => {
-    // Broadcast cursor position to everyone else in the room
-    // We do NOT save this to DB (it's transient)
     socket.to(roomId).emit("cursor-update", { userId, userName, x, y });
   });
 
-  // 4. PER-USER UNDO (The Tricky Part)
+  // 4. UNDO (Scoped to User)
   socket.on("undo", async ({ roomId, userId }) => {
     try {
       const room = await Room.findOne({ roomId });
       if (!room) return;
 
-      // Find the LAST element created by THIS user that is NOT deleted
-      // We iterate backwards to find the most recent one
-      let lastElementIndex = -1;
-      
+      let indexToUndo = -1;
+      // Find the last active element by this user
       for (let i = room.elements.length - 1; i >= 0; i--) {
-        if (room.elements[i].userId === userId && !room.elements[i].isDeleted) {
-          lastElementIndex = i;
+        const el = room.elements[i];
+        if (el.userId === userId && !el.isDeleted) {
+          indexToUndo = i;
           break;
         }
       }
 
-      if (lastElementIndex !== -1) {
-        // Mark as deleted (Soft Delete)
-        room.elements[lastElementIndex].isDeleted = true;
-        await room.save();
-
-        // Broadcast the specific updated element to clients
-        // The client will replace its local version with this "deleted" version
-        io.to(roomId).emit("element-update", room.elements[lastElementIndex]);
+      if (indexToUndo !== -1) {
+        await Room.updateOne(
+          { roomId },
+          {
+            $set: {
+              [`elements.${indexToUndo}.isDeleted`]: true,
+              [`elements.${indexToUndo}.deletedAt`]: Date.now(),
+            },
+          }
+        );
+        const updatedElement = { ...room.elements[indexToUndo], isDeleted: true };
+        io.to(roomId).emit("element-update", updatedElement);
       }
     } catch (error) {
-      console.error("Error executing undo:", error);
+      console.error("Undo Error:", error);
     }
   });
 
-  // 5. PER-USER REDO (Similar logic)
+  // 5. REDO (Scoped to User)
   socket.on("redo", async ({ roomId, userId }) => {
     try {
       const room = await Room.findOne({ roomId });
       if (!room) return;
 
-      // Find the "oldest" deleted element that comes AFTER the last visible element
-      // For simplicity in this assignment: Find the most recently deleted item by this user
-      // that we want to bring back.
-      let lastDeletedIndex = -1;
+      let indexToRedo = -1;
+      let lastDeletedTime = 0;
 
-      for (let i = room.elements.length - 1; i >= 0; i--) {
-        if (room.elements[i].userId === userId && room.elements[i].isDeleted) {
-           // We found the most recent deleted item.
-           // In a complex app, we'd need a stricter "stack" check, 
-           // but for this assignment, this logic suffices.
-           lastDeletedIndex = i;
-           break;
+      // Find the most recently deleted element by this user
+      room.elements.forEach((el, index) => {
+        if (el.userId === userId && el.isDeleted && el.deletedAt) {
+          if (el.deletedAt > lastDeletedTime) {
+            lastDeletedTime = el.deletedAt;
+            indexToRedo = index;
+          }
         }
-      }
+      });
 
-      if (lastDeletedIndex !== -1) {
-        room.elements[lastDeletedIndex].isDeleted = false;
-        await room.save();
-        io.to(roomId).emit("element-update", room.elements[lastDeletedIndex]);
+      if (indexToRedo !== -1) {
+        await Room.updateOne(
+          { roomId },
+          {
+            $set: {
+              [`elements.${indexToRedo}.isDeleted`]: false,
+              [`elements.${indexToRedo}.deletedAt`]: null,
+            },
+          }
+        );
+        const updatedElement = {
+          ...room.elements[indexToRedo],
+          isDeleted: false,
+        };
+        io.to(roomId).emit("element-update", updatedElement);
       }
     } catch (error) {
-      console.error("Error executing redo:", error);
+      console.error("Redo Error:", error);
     }
   });
 
   socket.on("disconnect", () => {
-    console.log("User Disconnected", socket.id);
+    // console.log("User Disconnected", socket.id);
   });
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
