@@ -62,19 +62,21 @@ A realtime collaborative whiteboard application (Excalidraw-style) where multipl
 
 ## Project Structure
 
+```text
 /
-├── client/                 # React + Vite Frontend
+├── client/                 # React Frontend
 │   ├── src/
-│   │   ├── components/     # Room.js, Home.js
-│   │   ├── utils/          # elementUtils.js
-│   │   ├── App.jsx
-│   │   └── index.css       # Tailwind imports
+│   │   ├── components/
+│   │   │   ├── Room.js     # Main Canvas Logic
+│   │   │   └── Home.js     # Landing Page
+│   │   ├── utils/
+│   │   │   └── elementUtils.js # Helper functions for shapes
+│   │   └── App.js
 │   └── package.json
-│
-├── server/                 # Express + Socket.io Backend
-│   ├── models/             # Mongoose Schemas
-│   ├── index.js            # Server Entry Point
+├── server/                 # Node Backend
+│   ├── models/
+│   │   └── Room.js         # Mongoose Schema
+│   ├── index.js            # Server Entry point
 │   └── package.json
-│
 └── README.md
 
